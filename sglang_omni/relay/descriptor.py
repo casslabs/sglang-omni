@@ -199,10 +199,12 @@ class Descriptor:
 
     def __init__(
         self,
-        data: torch.Tensor
-        | tuple[array_module.ndarray, Device | str]
-        | bytes
-        | tuple[int, int, Device | str, Any],
+        data: (
+            torch.Tensor
+            | tuple[array_module.ndarray, Device | str]
+            | bytes
+            | tuple[int, int, Device | str, Any]
+        ),
     ) -> None:
         """
         Memory descriptor for transferring data between workers.

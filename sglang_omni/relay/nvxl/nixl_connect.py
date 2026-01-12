@@ -32,15 +32,10 @@ from typing import Any, List, Optional
 from pydantic import BaseModel, ConfigDict, field_validator
 
 # Import descriptor-related classes from descriptor.py
-from sglang_omni.relay.descriptor import (
-    Descriptor,
-    Device,
-    DeviceKind,
-    SerializedDescriptor,
-)
+from sglang_omni.relay.descriptor import Descriptor, DeviceKind, SerializedDescriptor
 
 try:
-    import torch
+    pass
 except ImportError as e:
     raise ImportError(
         "PyTorch must be installed to use this module. Please install PyTorch, ex: 'pip install torch'."
@@ -385,9 +380,8 @@ class ActiveOperation(AbstractOperation):
         return self
 
     def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        match self.status:
-            case OperationStatus.IN_PROGRESS | OperationStatus.INITIALIZED:
-                self._status = OperationStatus.CANCELLED
+        if self.status in (OperationStatus.IN_PROGRESS, OperationStatus.INITIALIZED):
+            self._status = OperationStatus.CANCELLED
 
         self._release()
 
@@ -460,15 +454,15 @@ class ActiveOperation(AbstractOperation):
                 logger.debug(
                     f"dynamo.nixl_connect.{self.__class__.__name__}: Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={iteration_count / 10}s }}."
                 )
-            match self.status:
-                # "in progress" or "initialized" means the operation is ongoing.
-                case OperationStatus.INITIALIZED:
-                    await asyncio.sleep(0.1)
-                case OperationStatus.IN_PROGRESS:
-                    await asyncio.sleep(0.1)
+            # "in progress" or "initialized" means the operation is ongoing.
+            if self.status in (
+                OperationStatus.INITIALIZED,
+                OperationStatus.IN_PROGRESS,
+            ):
+                await asyncio.sleep(0.1)
+            else:
                 # Any other state indicates completion or error.
-                case _:
-                    return
+                return
 
     @abstractmethod
     def cancel(self) -> None:
@@ -491,9 +485,12 @@ class ActiveOperation(AbstractOperation):
         Gets the status of the operation.
         """
         # Early return if the operation is already complete, errored, or cancelled.
-        match self._status:
-            case OperationStatus.COMPLETE | OperationStatus.ERRORED | OperationStatus.CANCELLED:
-                return self._status
+        if self._status in (
+            OperationStatus.COMPLETE,
+            OperationStatus.ERRORED,
+            OperationStatus.CANCELLED,
+        ):
+            return self._status
 
         if self._xfer_hndl is None:
             raise RuntimeError("NIXL transfer handle is invalid.")
@@ -973,15 +970,15 @@ class PassiveOperation(AbstractOperation):
         # Loop until the operation is no longer in progress (or "initialized"),
         # yielding control to the event loop to allow other operations to run.
         while True:
-            match self.status:
-                # "in progress" or "initialized" means the operation is ongoing.
-                case OperationStatus.INITIALIZED:
-                    await asyncio.sleep(0.1)
-                case OperationStatus.IN_PROGRESS:
-                    await asyncio.sleep(0.1)
+            # "in progress" or "initialized" means the operation is ongoing.
+            if self.status in (
+                OperationStatus.INITIALIZED,
+                OperationStatus.IN_PROGRESS,
+            ):
+                await asyncio.sleep(0.1)
+            else:
                 # Any other state indicates completion or error.
-                case _:
-                    return
+                return
 
     def metadata(self, hex_encode: bool = False) -> RdmaMetadata:
         """
@@ -1027,9 +1024,12 @@ class PassiveOperation(AbstractOperation):
         Gets the status of the operation.
         """
         # Early return if the operation is already complete, errored, or cancelled.
-        match self._status:
-            case OperationStatus.COMPLETE | OperationStatus.ERRORED | OperationStatus.CANCELLED:
-                return self._status
+        if self._status in (
+            OperationStatus.COMPLETE,
+            OperationStatus.ERRORED,
+            OperationStatus.CANCELLED,
+        ):
+            return self._status
 
         old_status = self._status
 

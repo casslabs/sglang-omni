@@ -3,8 +3,7 @@ import logging
 import os
 from typing import List, Optional
 
-from sglang.srt.environ import envs
-from sglang.srt.utils import get_free_port, maybe_wrap_ipv6_address
+from sglang.srt.utils import maybe_wrap_ipv6_address
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +82,6 @@ def get_ib_devices_for_gpu(ib_device_str: Optional[str], gpu_id: int) -> Optiona
             )
         # Not JSON format, treat as old format - return same devices for all GPUs
         return ib_device_str
-
-
 
 
 class MooncakeTransferEngine:

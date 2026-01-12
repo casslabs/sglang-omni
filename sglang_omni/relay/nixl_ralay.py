@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import time
 import asyncio
-from typing import Any
 import logging
+from typing import Any
 
-from sglang_omni.relay.ralay import Ralay
-from sglang_omni.relay.nvxl.nixl_connect import Connector, ReadableOperation, RdmaMetadata, ReadOperation
 from sglang_omni.relay.descriptor import Descriptor
+from sglang_omni.relay.nvxl.nixl_connect import (
+    Connector,
+    RdmaMetadata,
+    ReadableOperation,
+    ReadOperation,
+)
+from sglang_omni.relay.ralay import Ralay
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +26,15 @@ class NixlRalay(Ralay):
 
         self.config = config
         self.host = config.get("host", "127.0.0.1")
-        self.metadata_server = config.get("metadata_server", "http://127.0.0.1:8080/metadata")
+        self.metadata_server = config.get(
+            "metadata_server", "http://127.0.0.1:8080/metadata"
+        )
         self.device_name = config.get("device_name", "")
         self.gpu_id = config.get("gpu_id", 0)
-        
+
         self.connector: Connector | None = None
         self._pending_operations: dict[str, tuple[Any, asyncio.Event]] = {}
-        
+
         self._metrics = {
             "puts": 0,
             "gets": 0,
@@ -38,7 +44,7 @@ class NixlRalay(Ralay):
         }
 
         self._init_sync()
-    
+
     def _run_maybe_async(self, coro_or_result):
         """Run a coroutine if it's a coroutine, otherwise return the result directly."""
         if asyncio.iscoroutine(coro_or_result):
@@ -49,11 +55,15 @@ class NixlRalay(Ralay):
                     "If the connector uses async methods, you must be in a sync context or use asyncio.run() at a higher level."
                 )
             except RuntimeError as e:
-                if "no running event loop" in str(e) or "no current event loop" in str(e):
+                if "no running event loop" in str(e) or "no current event loop" in str(
+                    e
+                ):
                     try:
                         return asyncio.run(coro_or_result)
                     except RuntimeError as run_error:
-                        if "cannot be called from a running event loop" in str(run_error):
+                        if "cannot be called from a running event loop" in str(
+                            run_error
+                        ):
                             raise RuntimeError(
                                 "Cannot run async operation synchronously while in an async context. "
                                 "If the connector uses async methods, you must be in a sync context."
@@ -75,16 +85,15 @@ class NixlRalay(Ralay):
             logger.error("Failed to initialize Nixl connector: %s", e)
             raise
 
-
     def put(self, descriptors: list[Descriptor]) -> ReadableOperation:
         """
         Put descriptors into the distributed store.
-        
+
         Parameters
         ----------
         descriptors : list[Any]
             List of Descriptor objects containing tensor data
-            
+
         Returns
         -------
         Any
@@ -96,22 +105,22 @@ class NixlRalay(Ralay):
         try:
             result = self.connector.create_readable(descriptors)
             readable_op = self._run_maybe_async(result)
-            
+
             total_size = 0
             for desc in descriptors:
                 total_size += desc.size
-            
+
             self._metrics["puts"] += 1
             self._metrics["bytes_transferred"] += total_size
-            
+
             logger.info(
                 "NixlRalay: created readable for %d descriptors, %d bytes",
                 len(descriptors),
                 total_size,
             )
-            
+
             return readable_op
-                
+
         except Exception as e:
             self._metrics["errors"] += 1
             logger.error("NixlRalay put failed: %s", e)
@@ -120,14 +129,14 @@ class NixlRalay(Ralay):
     def get(self, metadata: Any, descriptors: list[Descriptor]) -> Any:
         """
         Get data from the distributed store using metadata and descriptors.
-        
+
         Parameters
         ----------
         metadata : Any
             Metadata from readable operation (returned by put)
         descriptors : list[Any]
             List of Descriptor objects for receiving data
-            
+
         Returns
         -------
         Any
@@ -140,37 +149,39 @@ class NixlRalay(Ralay):
         try:
             result = self.connector.begin_read(metadata, descriptors)
             read_op = self._run_maybe_async(result)
-            
+
             total_size = 0
             for desc in descriptors:
                 total_size += desc.size
-            
+
             self._metrics["gets"] += 1
-            
+
             logger.debug(
                 "NixlRalay: began read for %d descriptors, %d bytes",
                 len(descriptors),
                 total_size,
             )
-            
+
             return read_op
-                
+
         except Exception as e:
             self._metrics["errors"] += 1
             logger.error("NixlRalay get failed: %s", e)
             raise
-    
-    async def get_async(self, metadata: RdmaMetadata, descriptors: list[Descriptor]) -> ReadOperation:
+
+    async def get_async(
+        self, metadata: RdmaMetadata, descriptors: list[Descriptor]
+    ) -> ReadOperation:
         """
         Get data from the distributed store using metadata and descriptors.
-        
+
         Parameters
         ----------
         metadata : Any
             Metadata from readable operation (returned by put)
         descriptors : list[Any]
             List of Descriptor objects for receiving data
-            
+
         Returns
         -------
         Any
@@ -196,12 +207,11 @@ class NixlRalay(Ralay):
             )
 
             return read_op
-    
+
         except Exception as e:
             self._metrics["errors"] += 1
             logger.error("NixlRalay get failed: %s", e)
             raise
-
 
     def cleanup(self, request_id: str) -> None:
         """Clean up resources for a request."""
@@ -212,7 +222,7 @@ class NixlRalay(Ralay):
         keys_to_remove = [k for k in self._pending_operations.keys() if request_id in k]
         for key in keys_to_remove:
             del self._pending_operations[key]
-        
+
         logger.debug("NixlRalay: cleanup requested for %s", request_id)
 
     def health(self) -> dict[str, Any]:
@@ -233,25 +243,24 @@ class NixlRalay(Ralay):
         """Clean shutdown."""
         if self.connector:
             try:
-                if hasattr(self.connector, 'close'):
+                if hasattr(self.connector, "close"):
                     result = self.connector.close()
                     self._run_maybe_async(result)
-                
+
                 self.connector = None
                 logger.info("NixlRalay closed")
             except Exception as e:
                 logger.error("Error closing Nixl connector: %s", e)
 
-
     async def put_async(self, descriptors: list[Descriptor]) -> ReadableOperation:
         """
         Put descriptors into the distributed store.
-        
+
         Parameters
         ----------
         descriptors : list[Any]
             List of Descriptor objects containing tensor data
-            
+
         Returns
         -------
         Any
