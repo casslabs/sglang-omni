@@ -6,18 +6,15 @@ import asyncio
 from typing import Any
 import logging
 
+from sglang_omni.relay.ralay import Ralay
+from sglang_omni.relay.nvxl.nixl_connect import Connector, ReadableOperation, RdmaMetadata, ReadOperation
+from sglang_omni.relay.descriptor import Descriptor
+
 logger = logging.getLogger(__name__)
 
 
-try:
-    from dynamo.nixl_connect import Connector
-except ImportError:
-    logger.warning("dynamo.nixl_connect not available, NixlConnector will not work")
-    Connector = None
-
-
-class NixlConnector:
-    """Nixl-based distributed connector for OmniConnector using dynamo.nixl_connect."""
+class NixlRalay(Ralay):
+    """Nixl-based relay implementation using dynamo.nixl_connect."""
 
     def __init__(self, config: dict[str, Any]):
         if Connector is None:
@@ -73,13 +70,13 @@ class NixlConnector:
         """Initialize Nixl connector synchronously."""
         try:
             self.connector = Connector(worker_id=self.config.get("worker_id"))
-            logger.info("NixlConnector initialized successfully")
+            logger.info("NixlRalay initialized successfully")
         except Exception as e:
             logger.error("Failed to initialize Nixl connector: %s", e)
             raise
 
 
-    def put(self, descriptors: list[Any]) -> Any:
+    def put(self, descriptors: list[Descriptor]) -> ReadableOperation:
         """
         Put descriptors into the distributed store.
         
@@ -108,7 +105,7 @@ class NixlConnector:
             self._metrics["bytes_transferred"] += total_size
             
             logger.info(
-                "NixlConnector: created readable for %d descriptors, %d bytes",
+                "NixlRalay: created readable for %d descriptors, %d bytes",
                 len(descriptors),
                 total_size,
             )
@@ -117,10 +114,10 @@ class NixlConnector:
                 
         except Exception as e:
             self._metrics["errors"] += 1
-            logger.error("NixlConnector put failed: %s", e)
+            logger.error("NixlRalay put failed: %s", e)
             raise
 
-    def get(self, metadata: Any, descriptors: list[Any]) -> Any:
+    def get(self, metadata: Any, descriptors: list[Descriptor]) -> Any:
         """
         Get data from the distributed store using metadata and descriptors.
         
@@ -151,7 +148,7 @@ class NixlConnector:
             self._metrics["gets"] += 1
             
             logger.debug(
-                "NixlConnector: began read for %d descriptors, %d bytes",
+                "NixlRalay: began read for %d descriptors, %d bytes",
                 len(descriptors),
                 total_size,
             )
@@ -160,91 +157,10 @@ class NixlConnector:
                 
         except Exception as e:
             self._metrics["errors"] += 1
-            logger.error("NixlConnector get failed: %s", e)
-            raise
-
-    def cleanup(self, request_id: str) -> None:
-        """Clean up resources for a request."""
-        if not self.connector:
-            return
-
-        # Clean up pending operations
-        keys_to_remove = [k for k in self._pending_operations.keys() if request_id in k]
-        for key in keys_to_remove:
-            del self._pending_operations[key]
-        
-        logger.debug("NixlConnector: cleanup requested for %s", request_id)
-
-    def health(self) -> dict[str, Any]:
-        """Get connector health status."""
-        if not self.connector:
-            return {"status": "unhealthy", "error": "Connector not initialized"}
-
-        return {
-            "status": "healthy",
-            "host": self.host,
-            "metadata_server": self.metadata_server,
-            "device_name": self.device_name,
-            "gpu_id": self.gpu_id,
-            **self._metrics,
-        }
-
-    def close(self):
-        """Clean shutdown."""
-        if self.connector:
-            try:
-                if hasattr(self.connector, 'close'):
-                    result = self.connector.close()
-                    self._run_maybe_async(result)
-                
-                self.connector = None
-                logger.info("NixlConnector closed")
-            except Exception as e:
-                logger.error("Error closing Nixl connector: %s", e)
-
-
-    async def put_async(self, descriptors: list[Any]) -> Any:
-        """
-        Put descriptors into the distributed store.
-        
-        Parameters
-        ----------
-        descriptors : list[Any]
-            List of Descriptor objects containing tensor data
-            
-        Returns
-        -------
-        Any
-            Readable operation object with metadata() and wait_for_completion() methods
-        """
-        if not self.connector:
-            logger.error("Connector not initialized")
-            raise RuntimeError("Connector not initialized")
-
-        try:
-            readable_op = await self.connector.create_readable(descriptors)
-
-            total_size = 0
-            for desc in descriptors:
-                total_size += desc.size
-
-            self._metrics["puts"] += 1
-            self._metrics["bytes_transferred"] += total_size
-
-            logger.info(
-                "NixlConnector: created readable for %d descriptors, %d bytes",
-                len(descriptors),
-                total_size,
-            )
-
-            return readable_op
-
-        except Exception as e:
-            self._metrics["errors"] += 1
-            logger.error("NixlConnector put failed: %s", e)
+            logger.error("NixlRalay get failed: %s", e)
             raise
     
-    async def get_async(self, metadata: Any, descriptors: list[Any]) -> Any:
+    async def get_async(self, metadata: RdmaMetadata, descriptors: list[Descriptor]) -> ReadOperation:
         """
         Get data from the distributed store using metadata and descriptors.
         
@@ -274,7 +190,7 @@ class NixlConnector:
             self._metrics["gets"] += 1
 
             logger.debug(
-                "NixlConnector: began read for %d descriptors, %d bytes",
+                "NixlRalay: began read for %d descriptors, %d bytes",
                 len(descriptors),
                 total_size,
             )
@@ -283,5 +199,87 @@ class NixlConnector:
     
         except Exception as e:
             self._metrics["errors"] += 1
-            logger.error("NixlConnector get failed: %s", e)
+            logger.error("NixlRalay get failed: %s", e)
+            raise
+
+
+    def cleanup(self, request_id: str) -> None:
+        """Clean up resources for a request."""
+        if not self.connector:
+            return
+
+        # Clean up pending operations
+        keys_to_remove = [k for k in self._pending_operations.keys() if request_id in k]
+        for key in keys_to_remove:
+            del self._pending_operations[key]
+        
+        logger.debug("NixlRalay: cleanup requested for %s", request_id)
+
+    def health(self) -> dict[str, Any]:
+        """Get connector health status."""
+        if not self.connector:
+            return {"status": "unhealthy", "error": "Connector not initialized"}
+
+        return {
+            "status": "healthy",
+            "host": self.host,
+            "metadata_server": self.metadata_server,
+            "device_name": self.device_name,
+            "gpu_id": self.gpu_id,
+            **self._metrics,
+        }
+
+    def close(self) -> None:
+        """Clean shutdown."""
+        if self.connector:
+            try:
+                if hasattr(self.connector, 'close'):
+                    result = self.connector.close()
+                    self._run_maybe_async(result)
+                
+                self.connector = None
+                logger.info("NixlRalay closed")
+            except Exception as e:
+                logger.error("Error closing Nixl connector: %s", e)
+
+
+    async def put_async(self, descriptors: list[Descriptor]) -> ReadableOperation:
+        """
+        Put descriptors into the distributed store.
+        
+        Parameters
+        ----------
+        descriptors : list[Any]
+            List of Descriptor objects containing tensor data
+            
+        Returns
+        -------
+        Any
+            Readable operation object with metadata() and wait_for_completion() methods
+        """
+        if not self.connector:
+            logger.error("Connector not initialized")
+            raise RuntimeError("Connector not initialized")
+
+        try:
+            readable_op = await self.connector.create_readable(descriptors)
+
+            total_size = 0
+            for desc in descriptors:
+                total_size += desc.size
+
+            self._metrics["puts"] += 1
+            self._metrics["bytes_transferred"] += total_size
+
+            logger.info(
+                "NixlRalay: created readable for %d descriptors, %d bytes",
+                len(descriptors),
+                total_size,
+            )
+
+            return readable_op
+
+        except Exception as e:
+            self._metrics["errors"] += 1
+            logger.error("NixlRalay put failed: %s", e)
             raise

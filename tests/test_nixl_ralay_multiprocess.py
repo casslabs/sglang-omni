@@ -31,9 +31,10 @@ if torch.cuda.is_available():
         # 在某些情况下（如在 pytest 中），可能已经设置过
         pass
 
-# Check if dynamo.nixl_connect is available
+# Check if nixl_connect is available
 try:
-    from dynamo.nixl_connect import Connector, Descriptor
+    from sglang_omni.relay.nvxl.nixl_connect import Connector
+    from sglang_omni.relay.descriptor import Descriptor
 except ImportError:
     Connector = None
     Descriptor = None
@@ -42,7 +43,7 @@ except ImportError:
 def sender_process(
     config: Dict[str, Any],
     metadata_queue: multiprocessing.Queue,
-    original_data_queue: multiprocessing.Queue,  # 新增：用于传递原始数据用于验证
+    original_data_queue: multiprocessing.Queue,
     ready_event: multiprocessing.Event,
     done_event: multiprocessing.Event,
     num_transfers: int,
@@ -50,17 +51,18 @@ def sender_process(
     results_dict: Dict[str, Any],
 ):
     """
-    发送进程：负责创建数据并通过 put_async 发送，尽量复用 connection。
+    发送进程：负责创建数据并通过 put_async 发送。
     
     每次传输完成后，通过调用 wait_for_completion() 来判断传输是否完成。
-    这样确保每次传输都真正完成后再进行下一次传输。
     
     Parameters
     ----------
     config : Dict[str, Any]
-        Connector 配置
+        NixlRalay 配置
     metadata_queue : multiprocessing.Queue
         用于传递 metadata 的队列
+    original_data_queue : multiprocessing.Queue
+        用于传递原始数据用于验证的队列
     ready_event : multiprocessing.Event
         用于同步的 ready 事件
     done_event : multiprocessing.Event
@@ -73,9 +75,9 @@ def sender_process(
         用于存储结果的字典（进程间共享）
     """
     async def run_sender():
-        from sglang_omni.relay.nixl_reuse_ralay import NixlReuseConnector
+        from sglang_omni.relay.nixl_ralay import NixlRalay
         
-        connector = NixlReuseConnector(config)
+        connector = NixlRalay(config)
         device = f'cuda:{config["gpu_id"]}' if torch.cuda.is_available() else 'cpu'
         
         try:
@@ -101,16 +103,14 @@ def sender_process(
                 put_time = (put_end_time - put_start_time) * 1000  # 转换为毫秒
                 put_times.append(put_time)
                 
-                # 获取 metadata 并发送给接收进程（在等待完成之前发送，让接收端可以开始准备）
+                # 获取 metadata 并发送给接收进程
                 metadata = readable_op.metadata()
                 assert metadata is not None
                 
                 # 序列化 metadata 以便传递
-                # metadata 是一个 RdmaMetadata (Pydantic BaseModel) 对象
-                # 可以安全地使用 pickle 序列化，或者转换为字典
                 import pickle
                 try:
-                    # 尝试使用 pickle 序列化（推荐，因为 RdmaMetadata 是 Pydantic 模型）
+                    # 尝试使用 pickle 序列化
                     metadata_serialized = pickle.dumps(metadata)
                 except Exception:
                     # 如果 pickle 失败，尝试使用 model_dump (Pydantic v2) 或 dict() (Pydantic v1)
@@ -120,7 +120,7 @@ def sender_process(
                     except Exception as e:
                         raise RuntimeError(f"Failed to serialize metadata: {e}")
                 
-                # 发送 metadata 给接收进程（让接收端可以开始准备）
+                # 发送 metadata 给接收进程
                 metadata_queue.put({
                     'transfer_idx': transfer_idx,
                     'metadata': metadata_serialized,
@@ -130,18 +130,14 @@ def sender_process(
                 })
                 
                 # 发送原始数据的 CPU 副本用于验证
-                import pickle
                 original_data_serialized = pickle.dumps(original_values)
                 original_data_queue.put({
                     'transfer_idx': transfer_idx,
                     'original_data': original_data_serialized,
                 })
                 
-                # 等待传输完成（通过 wait_for_completion 判断）
-                # ReadableOperation.wait_for_completion() 等待远程的 ReadOperation 完成
-               
+                # 等待传输完成
                 await readable_op.wait_for_completion()
-                
                 
                 print(f"[Sender] Transfer {transfer_idx + 1}/{num_transfers}: Put time (including wait_for_completion) = {put_time:.2f} ms")
             
@@ -155,7 +151,7 @@ def sender_process(
             metadata_queue.put(None)  # 发送结束信号
             
             # 等待接收进程完成
-            done_event.wait(timeout=60)  # 最多等待 60 秒
+            done_event.wait(timeout=300)  # 最多等待 300 秒
             
         except Exception as e:
             results_dict['sender_error'] = str(e)
@@ -172,7 +168,7 @@ def sender_process(
 def receiver_process(
     config: Dict[str, Any],
     metadata_queue: multiprocessing.Queue,
-    original_data_queue: multiprocessing.Queue,  # 新增：用于接收原始数据用于验证
+    original_data_queue: multiprocessing.Queue,
     ready_event: multiprocessing.Event,
     done_event: multiprocessing.Event,
     num_transfers: int,
@@ -181,15 +177,14 @@ def receiver_process(
     """
     接收进程：负责通过 get_async 接收数据。
     
-    注意：ReadOperation 不能安全地复用 Connection（因为会创建 Remote 对象修改 Connection 状态），
-    所以接收进程会尝试复用，但可能会因为状态冲突而回退到创建新连接。
-    
     Parameters
     ----------
     config : Dict[str, Any]
-        Connector 配置
+        NixlRalay 配置
     metadata_queue : multiprocessing.Queue
         用于接收 metadata 的队列
+    original_data_queue : multiprocessing.Queue
+        用于接收原始数据用于验证的队列
     ready_event : multiprocessing.Event
         用于同步的 ready 事件
     done_event : multiprocessing.Event
@@ -200,9 +195,9 @@ def receiver_process(
         用于存储结果的字典（进程间共享）
     """
     async def run_receiver():
-        from sglang_omni.relay.nixl_reuse_ralay import NixlReuseConnector
+        from sglang_omni.relay.nixl_ralay import NixlRalay
         
-        connector = NixlReuseConnector(config)
+        connector = NixlRalay(config)
         device = f'cuda:{config["gpu_id"]}' if torch.cuda.is_available() else 'cpu'
         
         try:
@@ -229,7 +224,7 @@ def receiver_process(
                     
                     # 反序列化 metadata
                     import pickle
-                    from dynamo.nixl_connect import RdmaMetadata
+                    from sglang_omni.relay.nvxl.nixl_connect import RdmaMetadata
                     
                     metadata_obj = pickle.loads(metadata_serialized)
                     
@@ -253,7 +248,6 @@ def receiver_process(
                     # 测量 Get 时间
                     get_start_time = time.time()
                     
-                    # 添加详细日志来追踪连接复用情况
                     print(f"[Receiver] Transfer {transfer_count + 1}/{num_transfers}: Attempting get_async...")
                     try:
                         read_op = await connector.get_async(metadata, buffer_descriptors)
@@ -267,14 +261,6 @@ def receiver_process(
                         print(f"[Receiver] Error message: {error_str}")
                         print(f"[Receiver] Error details:")
                         traceback.print_exc()
-                        
-                        # 检查是否是状态冲突相关的错误
-                        if "invalidated" in error_str or "NIXL_ERR_NOT_FOUND" in error_str or "remove_remote_agent" in error_str:
-                            print(f"\n[Receiver] This appears to be a STATE CONFLICT error!")
-                            print(f"[Receiver] Connection reuse likely failed due to Remote agent state management.")
-                            results_dict['connection_reuse_failed'] = True
-                            results_dict['connection_reuse_error'] = error_str
-                            results_dict['connection_reuse_failed_transfer'] = transfer_count + 1
                         raise
                     
                     # 等待读取完成
@@ -387,32 +373,31 @@ def receiver_process(
     asyncio.run(run_receiver())
 
 
-@pytest.mark.skipif(Connector is None, reason="dynamo.nixl_connect not available")
+@pytest.mark.skipif(Connector is None, reason="nixl_connect not available")
 @pytest.mark.skipif(Descriptor is None, reason="Descriptor not available")
-def test_multiprocess_transfer_with_connection_reuse():
+def test_multiprocess_transfer_with_nixl_ralay():
     """
-    测试两个进程之间的数据传输，验证 connection 复用是否降低开销。
+    测试两个进程之间的数据传输，使用 NixlRalay。
     
-    发送进程（worker0）：复用 connection 进行多次 put_async 操作
-    接收进程（worker1）：尽量复用 connection 进行多次 get_async 操作
+    发送进程（worker0）：进行多次 put_async 操作
+    接收进程（worker1）：进行多次 get_async 操作
     
-    注意：使用 'spawn' 启动方法以避免 CUDA 在 fork 子进程中的重新初始化问题。
+    注意：
+    - 使用 'spawn' 启动方法以避免 CUDA 在 fork 子进程中的重新初始化问题
+    - NixlRalay 每次操作都会创建新的 Connection，不进行连接复用
+    - 此测试主要用于验证多进程环境下的数据传输正确性和性能
     """
     # 设置 multiprocessing 启动方法为 'spawn'（CUDA 要求）
-    # 必须在创建任何进程之前设置
     if torch.cuda.is_available():
         try:
             current_method = multiprocessing.get_start_method(allow_none=True)
             if current_method != 'spawn':
                 try:
-                    # 如果还没有设置，尝试设置为 'spawn'
                     multiprocessing.set_start_method('spawn', force=False)
                 except RuntimeError:
-                    # 如果已经设置过，需要使用 force=True
                     multiprocessing.set_start_method('spawn', force=True)
                     print(f"[Test] Set multiprocessing start method to 'spawn' (was: {current_method})")
         except RuntimeError as e:
-            # 如果无法设置，可能需要通过环境变量或命令行参数设置
             print(f"[Test] Warning: Cannot set start method to 'spawn': {e}")
             print("[Test] You may need to set multiprocessing start method before running the test")
     
@@ -435,12 +420,12 @@ def test_multiprocess_transfer_with_connection_reuse():
         "worker_id": "worker1",
     }
     
-    test_data_size = 100000
-    num_transfers = 8  # 测试5次传输
+    test_data_size = 100000  # 100K elements (~400 KB)
+    num_transfers = 5  # 测试5次传输
     
     # 创建进程间通信对象
     metadata_queue = multiprocessing.Queue()
-    original_data_queue = multiprocessing.Queue()  # 用于传递原始数据用于验证
+    original_data_queue = multiprocessing.Queue()
     ready_event = multiprocessing.Event()
     done_event = multiprocessing.Event()
     
@@ -449,12 +434,13 @@ def test_multiprocess_transfer_with_connection_reuse():
     results_dict = manager.dict()
     
     print("\n" + "="*80)
-    print("多进程传输测试 (Multiprocess Transfer with Connection Reuse)")
+    print("多进程传输测试 (Multiprocess Transfer with NixlRalay)")
     print("="*80)
     print(f"数据大小: {test_data_size} elements (~{test_data_size * 4 / (1024*1024):.2f} MB)")
     print(f"传输次数: {num_transfers}")
     print(f"发送进程: worker0 (GPU {config_worker0['gpu_id']})")
     print(f"接收进程: worker1 (GPU {config_worker1['gpu_id']})")
+    print(f"注意: NixlRalay 每次操作都会创建新的 Connection")
     print("-"*80)
     
     # 创建发送进程
@@ -475,7 +461,7 @@ def test_multiprocess_transfer_with_connection_reuse():
         receiver.start()
         
         # 等待进程完成
-        sender.join(timeout=300)  # 最多等待 120 秒
+        sender.join(timeout=300)  # 最多等待 300 秒
         receiver.join(timeout=300)
         
         # 检查进程是否正常退出
@@ -504,7 +490,6 @@ def test_multiprocess_transfer_with_connection_reuse():
                 for error_info in verification_errors:
                     print(f"传输 {error_info['transfer_idx']}: {error_info['error']}")
                 print("="*80)
-                # 如果有验证错误，测试应该失败
                 pytest.fail(f"Data verification failed in {len(verification_errors)} transfer(s)")
         
         # 检查数据验证警告
@@ -514,22 +499,6 @@ def test_multiprocess_transfer_with_connection_reuse():
                 print("\n[Test] Data verification warnings:")
                 for warning_info in verification_warnings:
                     print(f"  传输 {warning_info['transfer_idx']}: {warning_info['warning']}")
-        
-        # 检查连接复用是否失败
-        if 'connection_reuse_failed' in results_dict:
-            print("\n" + "="*80)
-            print("连接复用失败分析 (Connection Reuse Failure Analysis)")
-            print("="*80)
-            print(f"失败位置: 传输 {results_dict.get('connection_reuse_failed_transfer', 'unknown')}")
-            print(f"错误信息: {results_dict.get('connection_reuse_error', 'unknown')}")
-            print("\n原因分析:")
-            print("  1. ReadOperation 创建 Remote 对象时会修改 Connection 的远程 agent 状态")
-            print("  2. 当复用同一个 Connection 时，上一个 Remote 对象可能还没完全清理")
-            print("  3. 创建新的 Remote 对象时，Connection 状态不一致导致失败")
-            print("\n解决方案:")
-            print("  - Get 操作每次都创建新的 Connection（避免状态冲突）")
-            print("  - 或者确保上一个 Remote 对象完全清理后再复用 Connection")
-            print("="*80)
         
         # 打印结果
         print("\n" + "="*80)
@@ -544,18 +513,15 @@ def test_multiprocess_transfer_with_connection_reuse():
             
             print("\n[发送进程] Put 操作时间:")
             print(f"  首次 Put 时间: {sender_first_put_time:.2f} ms")
-            print(f"  后续 Put 平均时间: {sender_subsequent_avg:.2f} ms")
+            if len(sender_put_times) > 1:
+                print(f"  后续 Put 平均时间: {sender_subsequent_avg:.2f} ms")
             print(f"  Put 时间范围: {min(sender_put_times):.2f} - {max(sender_put_times):.2f} ms")
             print(f"  Put 平均时间: {sender_avg_put_time:.2f} ms")
             
-            if sender_first_put_time > 0:
+            if len(sender_put_times) > 1 and sender_first_put_time > 0:
                 put_time_reduction = (sender_first_put_time - sender_subsequent_avg) / sender_first_put_time * 100
-                print(f"  Put 时间减少: {put_time_reduction:.2f}%")
-                
-                if put_time_reduction > 5:
-                    print("  ✅ 结论: 连接复用成功，后续 Put 操作时间显著减少")
-                else:
-                    print("  ⚠️  结论: 连接复用效果不明显")
+                print(f"  Put 时间变化: {put_time_reduction:.2f}%")
+                print("  注意: NixlRalay 每次操作都创建新连接，时间可能较稳定")
         
         if 'receiver_get_times' in results_dict:
             receiver_get_times = results_dict['receiver_get_times']
@@ -573,6 +539,8 @@ def test_multiprocess_transfer_with_connection_reuse():
             print(f"  总传输时间范围: {min(receiver_total_times):.2f} - {max(receiver_total_times):.2f} ms")
             print(f"  总传输平均时间: {receiver_avg_total_time:.2f} ms")
         
+        print("\n" + "="*80)
+        print("测试完成")
         print("="*80)
         
     finally:
