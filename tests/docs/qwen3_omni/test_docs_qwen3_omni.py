@@ -25,13 +25,8 @@ import torch
 from jiwer import process_words
 
 from benchmarks.tasks.voice_clone import load_asr_model, normalize_text, transcribe
-from tests.utils import (
-    disable_proxy,
-    find_free_port,
-    no_proxy_env,
-    start_server_from_cmd,
-    stop_server,
-)
+from sglang_omni.utils import find_available_port
+from tests.utils import disable_proxy, no_proxy_env, start_server_from_cmd, stop_server
 
 MODEL_PATH = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 MODEL_NAME = "qwen3-omni"
@@ -114,7 +109,7 @@ class TestTextOnlyMode:
 
     @pytest.fixture(scope="class")
     def server(self, tmp_path_factory: pytest.TempPathFactory):
-        port = find_free_port()
+        port = find_available_port()
         log_file = tmp_path_factory.mktemp("text_only_logs") / "server.log"
         cmd = [
             sys.executable,
@@ -182,7 +177,7 @@ class TestSpeechMode:
 
     @pytest.fixture(scope="class")
     def server(self, tmp_path_factory: pytest.TempPathFactory):
-        port = find_free_port()
+        port = find_available_port()
         log_file = tmp_path_factory.mktemp("speech_logs") / "server.log"
         cmd = [
             sys.executable,

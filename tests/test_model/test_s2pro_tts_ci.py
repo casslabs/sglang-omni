@@ -39,6 +39,7 @@ from benchmarks.eval.benchmark_tts_speed import (
     TtsSpeedBenchmarkConfig,
     run_tts_speed_benchmark,
 )
+from sglang_omni.utils import find_available_port
 from tests.test_model.conftest import (
     S2PRO_STAGE_CONSISTENCY,
     S2PRO_STAGE_NONSTREAM,
@@ -51,7 +52,6 @@ from tests.utils import (
     assert_streaming_consistency,
     assert_summary_metrics,
     assert_wer_results,
-    find_free_port,
     no_proxy_env,
     start_server_from_cmd,
     stop_server,
@@ -432,7 +432,7 @@ def cleanup_generated_audio_fixture():
 @pytest.fixture(scope="module")
 def server_process(tmp_path_factory: pytest.TempPathFactory):
     """Start the s2-pro server and wait until healthy."""
-    port = find_free_port()
+    port = find_available_port()
     log_file = tmp_path_factory.mktemp("server_logs") / "server.log"
     cmd = [
         sys.executable,
