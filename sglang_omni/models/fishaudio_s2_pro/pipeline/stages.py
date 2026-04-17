@@ -68,6 +68,20 @@ def _resolve_disable_cuda_graph(device: str) -> bool:
     return not _is_hopper_device(device)
 
 
+def _parse_env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return int(raw.strip())
+
+
+def _parse_env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return float(raw.strip())
+
+
 def _resolve_checkpoint(checkpoint: str) -> str:
     if os.path.isdir(checkpoint):
         return checkpoint
@@ -234,6 +248,9 @@ def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
         import httpx
         import torchaudio
 
+        logger.info("Encoding reference audio from %s", audio_path)
+        t0 = time.perf_counter()
+
         if audio_path.startswith(("http://", "https://")):
             resp = httpx.get(audio_path, follow_redirects=True, timeout=30)
             resp.raise_for_status()
@@ -250,9 +267,18 @@ def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
             indices, _ = codec.encode(audios, audio_lengths)
             if indices.ndim == 3:
                 indices = indices[0]
+        logger.info(
+            "Encoded reference audio from %s into shape=%s in %.2fs",
+            audio_path,
+            tuple(indices.shape),
+            time.perf_counter() - t0,
+        )
         return indices.cpu()
 
     def _preprocess(payload: StagePayload) -> StagePayload:
+        request_id = payload.request_id
+        t0 = time.perf_counter()
+        logger.info("Preprocessing request %s", request_id)
         inputs = payload.request.inputs or {}
         params = payload.request.params or {}
 
@@ -268,6 +294,11 @@ def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
         references: list[Reference] | None = None
         raw_refs = inputs.get("references")
         if raw_refs:
+            logger.info(
+                "Request %s has %d reference(s) for voice cloning",
+                request_id,
+                len(raw_refs),
+            )
             references = []
             for ref_data in raw_refs:
                 vq_codes = ref_data.get("vq_codes")
@@ -291,6 +322,13 @@ def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
             references=references,
             num_codebooks=num_codebooks,
         )
+        logger.info(
+            "Built prompt for request %s: input_ids=%d vq_parts=%d in %.2fs",
+            request_id,
+            len(prompt_data["input_ids"]),
+            len(prompt_data["vq_parts"] or []),
+            time.perf_counter() - t0,
+        )
 
         state = S2ProState(
             input_ids=prompt_data["input_ids"],
@@ -303,6 +341,12 @@ def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
             top_p=params.get("top_p", 0.8),
             top_k=params.get("top_k", 30),
             repetition_penalty=params.get("repetition_penalty", 1.1),
+        )
+        logger.info(
+            "Preprocessing complete for request %s in %.2fs (max_new_tokens=%s)",
+            request_id,
+            time.perf_counter() - t0,
+            state.max_new_tokens,
         )
         return store_state(payload, state)
 
@@ -353,20 +397,26 @@ def create_sglang_tts_engine_executor(
 
     _patch_fish_config_for_sglang(checkpoint_dir)
     disable_cuda_graph = _resolve_disable_cuda_graph(device)
+    mem_fraction_static = _parse_env_float("AUTOCAST_SGLANG_MEM_FRACTION_STATIC", 0.45)
+    chunked_prefill_size = _parse_env_int("AUTOCAST_SGLANG_CHUNKED_PREFILL_SIZE", 2048)
+    max_running_requests = _parse_env_int("AUTOCAST_SGLANG_MAX_RUNNING_REQUESTS", 4)
     logger.info(
-        "S2-Pro server args: device=%s disable_cuda_graph=%s attention_backend=%s",
+        "S2-Pro server args: device=%s disable_cuda_graph=%s attention_backend=%s mem_fraction_static=%.2f chunked_prefill_size=%s max_running_requests=%s",
         device,
         disable_cuda_graph,
         os.environ.get("AUTOCAST_SGLANG_ATTENTION_BACKEND", "auto"),
+        mem_fraction_static,
+        chunked_prefill_size,
+        max_running_requests,
     )
 
     server_args = ServerArgs(
         model_path=checkpoint_dir,
         tp_size=1,
         dtype="bfloat16",
-        mem_fraction_static=0.85,
-        chunked_prefill_size=8192,
-        max_running_requests=64,
+        mem_fraction_static=mem_fraction_static,
+        chunked_prefill_size=chunked_prefill_size,
+        max_running_requests=max_running_requests,
         disable_cuda_graph=disable_cuda_graph,
     )
 
