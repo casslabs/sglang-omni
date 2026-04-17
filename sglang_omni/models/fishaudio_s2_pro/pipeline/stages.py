@@ -246,6 +246,7 @@ def create_preprocessing_executor(model_path: str) -> PreprocessingExecutor:
                         audio_bytes=b"",
                         text=ref_data.get("text", ""),
                         vq_codes=vq_codes,
+                        speaker=ref_data.get("speaker"),
                     )
                 )
 

@@ -10,6 +10,7 @@ S2-Pro uses Qwen3 chat-format prompts built via the ``Conversation`` class:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,6 +32,45 @@ class Reference:
     audio_bytes: bytes
     text: str
     vq_codes: torch.Tensor | None = None
+    speaker: int | str | None = None
+
+
+_SPEAKER_TAGGED_TURN_RE = re.compile(r"\[(S\d+)\]\s*", re.IGNORECASE)
+
+
+def _canonical_speaker_id(value: int | str | None) -> int | str | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    upper_text = text.upper()
+    if upper_text.startswith("S") and upper_text[1:].isdigit():
+        return int(upper_text[1:])
+    if text.isdigit():
+        return int(text)
+    return text
+
+
+def _parse_speaker_tagged_turns(text: str) -> list[tuple[int | str, str]]:
+    cleaned = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    matches = list(_SPEAKER_TAGGED_TURN_RE.finditer(cleaned))
+    if not matches:
+        return []
+
+    turns: list[tuple[int | str, str]] = []
+    for idx, match in enumerate(matches):
+        speaker_id = _canonical_speaker_id(match.group(1))
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(cleaned)
+        turn_text = cleaned[start:end].strip()
+        if speaker_id is not None and turn_text:
+            turns.append((speaker_id, turn_text))
+    return turns
 
 
 class S2ProTokenizerAdapter:
@@ -64,6 +104,7 @@ class S2ProTokenizerAdapter:
     ) -> dict[str, Any]:
         """Build an S2-Pro prompt using Qwen3 chat format."""
         from sglang_omni.models.fishaudio_s2_pro.fish_speech.content_sequence import (
+            ContentSequence,
             TextPart,
             VQPart,
         )
@@ -77,8 +118,6 @@ class S2ProTokenizerAdapter:
         # System message: reference audio for voice cloning
         if references:
             system_parts: list = []
-            all_codes = []
-
             system_parts.append(
                 TextPart(
                     text="convert the provided text to speech reference to the following:\n\nText:\n",
@@ -86,18 +125,22 @@ class S2ProTokenizerAdapter:
                 )
             )
 
+            reference_seq = ContentSequence(modality="interleave")
             for ref in references:
-                ref_text = f"<|speaker:{speaker}|>{ref.text}" if ref.text else ""
-                if ref_text:
-                    system_parts.append(TextPart(text=ref_text, cal_loss=False))
+                speaker_id = _canonical_speaker_id(ref.speaker)
+                if speaker_id is None:
+                    speaker_id = _canonical_speaker_id(speaker) or 0
+
+                ref_parts: list[Any] = []
+                if ref.text:
+                    ref_parts.append(TextPart(text=ref.text, cal_loss=False))
                 if ref.vq_codes is not None:
-                    all_codes.append(ref.vq_codes)
+                    ref_parts.append(VQPart(codes=ref.vq_codes, cal_loss=False))
+                if ref_parts:
+                    reference_seq.append(ref_parts, speaker=speaker_id, add_end=True)
 
             system_parts.append(TextPart(text="\n\nSpeech:\n", cal_loss=False))
-
-            if all_codes:
-                combined = torch.cat(all_codes, dim=1)
-                system_parts.append(VQPart(codes=combined, cal_loss=False))
+            system_parts.extend(reference_seq.parts)
 
             conversation.append(
                 Message(
@@ -110,11 +153,24 @@ class S2ProTokenizerAdapter:
             )
 
         # User message: text to synthesize
-        text_with_tag = f"<|speaker:{speaker}|>{text}"
+        dialogue_turns = _parse_speaker_tagged_turns(text)
+        if dialogue_turns:
+            dialogue_seq = ContentSequence(modality="interleave")
+            for speaker_id, turn_text in dialogue_turns:
+                dialogue_seq.append(
+                    TextPart(text=turn_text, cal_loss=False),
+                    speaker=speaker_id,
+                    add_end=True,
+                )
+            user_parts = dialogue_seq.parts
+        else:
+            text_with_tag = f"<|speaker:{speaker}|>{text}"
+            user_parts = [TextPart(text=text_with_tag, cal_loss=False)]
+
         conversation.append(
             Message(
                 role="user",
-                parts=[TextPart(text=text_with_tag, cal_loss=False)],
+                parts=user_parts,
                 cal_loss=False,
                 add_im_start=True,
                 add_im_end=True,

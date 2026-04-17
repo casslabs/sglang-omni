@@ -154,6 +154,7 @@ class SpeechReference(BaseModel):
     audio_path: str | None = None
     text: str | None = None
     vq_codes: list[list[int]] | list[int] | None = None
+    speaker: str | int | None = None
 
 
 class CreateSpeechRequest(BaseModel):
