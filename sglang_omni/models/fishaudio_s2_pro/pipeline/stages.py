@@ -82,6 +82,18 @@ def _parse_env_float(name: str, default: float) -> float:
     return float(raw.strip())
 
 
+def _resolve_requested_attention_backend() -> str | None:
+    raw = os.environ.get("AUTOCAST_SGLANG_ATTENTION_BACKEND")
+    if raw is None:
+        return None
+
+    normalized = raw.strip().lower()
+    if normalized in {"", "auto", "default", "none"}:
+        return None
+
+    return normalized
+
+
 def _resolve_checkpoint(checkpoint: str) -> str:
     if os.path.isdir(checkpoint):
         return checkpoint
@@ -400,17 +412,18 @@ def create_sglang_tts_engine_executor(
     mem_fraction_static = _parse_env_float("AUTOCAST_SGLANG_MEM_FRACTION_STATIC", 0.45)
     chunked_prefill_size = _parse_env_int("AUTOCAST_SGLANG_CHUNKED_PREFILL_SIZE", 2048)
     max_running_requests = _parse_env_int("AUTOCAST_SGLANG_MAX_RUNNING_REQUESTS", 4)
+    attention_backend = _resolve_requested_attention_backend()
     logger.info(
         "S2-Pro server args: device=%s disable_cuda_graph=%s attention_backend=%s mem_fraction_static=%.2f chunked_prefill_size=%s max_running_requests=%s",
         device,
         disable_cuda_graph,
-        os.environ.get("AUTOCAST_SGLANG_ATTENTION_BACKEND", "auto"),
+        attention_backend or "auto",
         mem_fraction_static,
         chunked_prefill_size,
         max_running_requests,
     )
 
-    server_args = ServerArgs(
+    server_args_kwargs = dict(
         model_path=checkpoint_dir,
         tp_size=1,
         dtype="bfloat16",
@@ -419,6 +432,10 @@ def create_sglang_tts_engine_executor(
         max_running_requests=max_running_requests,
         disable_cuda_graph=disable_cuda_graph,
     )
+    if attention_backend is not None:
+        server_args_kwargs["attention_backend"] = attention_backend
+
+    server_args = ServerArgs(**server_args_kwargs)
 
     engine = create_s2pro_sglang_engine(
         server_args=server_args,
