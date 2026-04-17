@@ -95,9 +95,10 @@ def _resolve_attention_backend(server_args: Any, gpu_id: int) -> str | None:
     if torch.cuda.is_available():
         device_name = torch.cuda.get_device_name(gpu_id)
         logger.info(
-            "Detected non-Hopper GPU (%s); leaving attention backend on auto for compatibility",
+            "Detected non-Hopper GPU (%s); forcing triton attention backend for compatibility",
             device_name,
         )
+        return "triton"
     else:
         logger.info("CUDA unavailable; leaving attention backend on auto")
 
