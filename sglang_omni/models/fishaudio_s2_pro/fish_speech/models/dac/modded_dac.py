@@ -5,13 +5,12 @@ from typing import List, Optional, Union
 
 import numpy as np
 import torch
-from audiotools.ml import BaseModel
-from dac.model.base import CodecMixin
-from dac.nn.layers import Snake1d, WNConv1d, WNConvTranspose1d
 from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.nn.utils.parametrizations import weight_norm
 from torch.nn.utils.parametrize import remove_parametrizations
+
+from .compat import BaseModel, CodecMixin, Snake1d, WNConv1d, WNConvTranspose1d
 
 
 @dataclass

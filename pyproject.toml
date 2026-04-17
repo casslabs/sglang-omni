@@ -40,6 +40,7 @@ dependencies = [
     "openai==2.6.1",
     "openai-harmony==0.0.4",
     "soundfile>=0.12.0",
+    "einops",
     # Testing
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
@@ -50,8 +51,6 @@ dependencies = [
     "tiktoken",
     "hydra-core",
     "omegaconf",
-    "descript-audiotools",
-    "descript-audio-codec",
     "torchaudio",
     # Gradio playground
     "gradio>=4.0.0",
