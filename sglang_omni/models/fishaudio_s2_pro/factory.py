@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
 import torch
@@ -16,6 +18,8 @@ from .runtime.s2pro_sglang_ar import (
     S2ProSGLangResourceManager,
 )
 from .tokenizer import S2ProTokenizerAdapter
+
+logger = logging.getLogger(__name__)
 
 
 def _patch_fish_config_for_sglang(model_path: str) -> None:
@@ -62,6 +66,44 @@ def _truncate_rope_to_bf16(model: torch.nn.Module) -> None:
             )
 
 
+def _is_hopper_gpu(gpu_id: int) -> bool:
+    if not torch.cuda.is_available():
+        return False
+
+    major, _minor = torch.cuda.get_device_capability(gpu_id)
+    return major == 9
+
+
+def _resolve_attention_backend(server_args: Any, gpu_id: int) -> str | None:
+    override = os.environ.get("AUTOCAST_SGLANG_ATTENTION_BACKEND")
+    if override is not None:
+        backend = override.strip().lower()
+        if backend in {"", "auto", "default", "none"}:
+            logger.info("AUTOCAST_SGLANG_ATTENTION_BACKEND=%r, using SGLang auto selection", override)
+            return None
+
+        logger.info("Using AUTOCAST_SGLANG_ATTENTION_BACKEND=%s", backend)
+        return backend
+
+    if server_args.attention_backend is not None:
+        return server_args.attention_backend
+
+    if _is_hopper_gpu(gpu_id):
+        logger.info("Detected Hopper-class GPU; forcing fa3 attention backend for S2-Pro")
+        return "fa3"
+
+    if torch.cuda.is_available():
+        device_name = torch.cuda.get_device_name(gpu_id)
+        logger.info(
+            "Detected non-Hopper GPU (%s); leaving attention backend on auto for compatibility",
+            device_name,
+        )
+    else:
+        logger.info("CUDA unavailable; leaving attention backend on auto")
+
+    return None
+
+
 def create_s2pro_sglang_engine(
     server_args: Any,
     audio_decoder: torch.nn.Module,
@@ -86,8 +128,7 @@ def create_s2pro_sglang_engine(
 
     _patch_fish_config_for_sglang(server_args.model_path)
 
-    if server_args.attention_backend is None:
-        server_args.attention_backend = "fa3"
+    server_args.attention_backend = _resolve_attention_backend(server_args, gpu_id)
 
     # Enable hidden state capture for unified decode
     want_cuda_graph = not server_args.disable_cuda_graph

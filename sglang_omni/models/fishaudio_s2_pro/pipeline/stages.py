@@ -32,6 +32,42 @@ _STREAM_LAST_VOCODE_TOKENS_KEY = "_stream_last_vocode_tokens"
 _STREAM_NEXT_VOCODE_TOKENS_KEY = "_stream_next_vocode_tokens"
 
 
+def _parse_env_flag(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    if normalized == "":
+        return None
+
+    raise ValueError(f"Invalid boolean value for {name}: {raw!r}")
+
+
+def _device_gpu_id(device: str) -> int:
+    return int(device.split(":")[-1]) if ":" in device else 0
+
+
+def _is_hopper_device(device: str) -> bool:
+    if not torch.cuda.is_available():
+        return False
+
+    major, _minor = torch.cuda.get_device_capability(_device_gpu_id(device))
+    return major == 9
+
+
+def _resolve_disable_cuda_graph(device: str) -> bool:
+    override = _parse_env_flag("AUTOCAST_SGLANG_DISABLE_CUDA_GRAPH")
+    if override is not None:
+        return override
+
+    return not _is_hopper_device(device)
+
+
 def _resolve_checkpoint(checkpoint: str) -> str:
     if os.path.isdir(checkpoint):
         return checkpoint
@@ -316,6 +352,14 @@ def create_sglang_tts_engine_executor(
         return _stream_codec
 
     _patch_fish_config_for_sglang(checkpoint_dir)
+    disable_cuda_graph = _resolve_disable_cuda_graph(device)
+    logger.info(
+        "S2-Pro server args: device=%s disable_cuda_graph=%s attention_backend=%s",
+        device,
+        disable_cuda_graph,
+        os.environ.get("AUTOCAST_SGLANG_ATTENTION_BACKEND", "auto"),
+    )
+
     server_args = ServerArgs(
         model_path=checkpoint_dir,
         tp_size=1,
@@ -323,7 +367,7 @@ def create_sglang_tts_engine_executor(
         mem_fraction_static=0.85,
         chunked_prefill_size=8192,
         max_running_requests=64,
-        disable_cuda_graph=False,
+        disable_cuda_graph=disable_cuda_graph,
     )
 
     engine = create_s2pro_sglang_engine(
