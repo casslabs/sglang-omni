@@ -45,6 +45,34 @@ FISH_BATCH_INVARIANT = os.getenv("FISH_BATCH_INVARIANT", "false").lower() in (
 )
 
 
+def _env_flag(name: str) -> bool | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+
+    normalized = raw.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    if normalized == "":
+        return None
+
+    raise ValueError(f"Invalid boolean value for {name}: {raw!r}")
+
+
+def _should_use_flash_attn_kvcache() -> bool:
+    override = _env_flag("AUTOCAST_SGLANG_USE_FISH_FLASH_ATTN_KVCACHE")
+    if override is not None:
+        return override
+
+    if not torch.cuda.is_available():
+        return False
+
+    major, _minor = torch.cuda.get_device_capability()
+    return major == 9
+
+
 @torch.library.custom_op(
     "mylib::flash_attn_kvcache", mutates_args=("k_cache", "v_cache")
 )
@@ -316,6 +344,9 @@ class Attention(nn.Module):
         q = apply_rotary_emb(q, freqs_cis)
         k = apply_rotary_emb(k, freqs_cis)
 
+        if not _should_use_flash_attn_kvcache():
+            return self._forward_kvcached_fallback(q, k, v, cache_seqlens, q_size)
+
         # Use flash_attn_with_kvcache - it handles KV cache update internally
         # q: (batch_size, seqlen, nheads, headdim)
         # k_cache/v_cache: (batch_size, seqlen_cache, nheads_k, headdim)
@@ -334,6 +365,53 @@ class Attention(nn.Module):
 
         y = y.contiguous().view(bsz, seqlen, q_size)
 
+        return self.wo(y)
+
+    def _forward_kvcached_fallback(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        cache_seqlens: Tensor,
+        q_size: int,
+    ) -> Tensor:
+        bsz, seqlen, _n_head, _head_dim = q.shape
+        k_cache, v_cache = self.kv_cache.get(bsz)
+        outputs = []
+
+        for batch_idx in range(bsz):
+            start = int(cache_seqlens[batch_idx].item())
+            end = start + seqlen
+
+            k_cache[batch_idx, start:end].copy_(k[batch_idx])
+            v_cache[batch_idx, start:end].copy_(v[batch_idx])
+
+            q_i = q[batch_idx : batch_idx + 1].transpose(1, 2)
+            k_i = k_cache[batch_idx : batch_idx + 1, :end].transpose(1, 2)
+            v_i = v_cache[batch_idx : batch_idx + 1, :end].transpose(1, 2)
+
+            k_i = k_i.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
+            v_i = v_i.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
+
+            attn_mask = None
+            if seqlen > 1:
+                query_positions = (
+                    torch.arange(seqlen, device=q.device).unsqueeze(-1) + start
+                )
+                key_positions = torch.arange(end, device=q.device).unsqueeze(0)
+                attn_mask = (key_positions <= query_positions).unsqueeze(0).unsqueeze(0)
+
+            y_i = self._scaled_dot_product_attention(
+                q_i,
+                k_i,
+                v_i,
+                attn_mask=attn_mask,
+                is_causal=attn_mask is None,
+            )
+            outputs.append(y_i.transpose(1, 2))
+
+        y = torch.cat(outputs, dim=0)
+        y = y.contiguous().view(bsz, seqlen, q_size)
         return self.wo(y)
 
 
