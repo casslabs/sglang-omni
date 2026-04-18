@@ -94,6 +94,13 @@ class S2ProSGLangIterationController:
             req.is_chunked -= 1
             return
 
+        if output.data is None:
+            logger.warning(
+                "Request %s produced no step output after chunked prefill handling",
+                request.request_id,
+            )
+            return
+
         codes = output.data.codes.clone()
         data.output_codes.append(codes)
 
@@ -113,6 +120,9 @@ class S2ProSGLangIterationController:
         data: S2ProSGLangRequestData = request.data
 
         if data.req.is_chunked > 0:
+            return False
+
+        if output.data is None:
             return False
 
         semantic_token = output.data.codes[0, -1].item()
