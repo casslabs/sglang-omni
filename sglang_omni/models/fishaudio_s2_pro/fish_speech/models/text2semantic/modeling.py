@@ -393,20 +393,21 @@ class Attention(nn.Module):
             k_i = k_i.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
             v_i = v_i.repeat_interleave(self.n_head // self.n_local_heads, dim=1)
 
-            attn_mask = None
-            if seqlen > 1:
-                query_positions = (
-                    torch.arange(seqlen, device=q.device).unsqueeze(-1) + start
-                )
-                key_positions = torch.arange(end, device=q.device).unsqueeze(0)
-                attn_mask = (key_positions <= query_positions).unsqueeze(0).unsqueeze(0)
+            # In KV-cached decode, query positions are absolute positions in the
+            # growing cache. We must build the causal mask against those absolute
+            # positions even for seqlen == 1; falling back to a generic lower-
+            # triangular mask would only expose key 0 when L=1, which corrupts
+            # autoregressive decoding.
+            query_positions = torch.arange(seqlen, device=q.device).unsqueeze(-1) + start
+            key_positions = torch.arange(end, device=q.device).unsqueeze(0)
+            attn_mask = (key_positions <= query_positions).unsqueeze(0).unsqueeze(0)
 
             y_i = self._scaled_dot_product_attention(
                 q_i,
                 k_i,
                 v_i,
                 attn_mask=attn_mask,
-                is_causal=attn_mask is None,
+                is_causal=False,
             )
             outputs.append(y_i.transpose(1, 2))
 
